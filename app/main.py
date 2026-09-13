@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from fastapi.middleware.cors import CORSMiddleware
 
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 AUTO_BETTING = os.getenv("AUTO_BETTING", "false").lower() == "true"
@@ -91,7 +91,12 @@ app = FastAPI(
     title="CrashSignalAI",
     lifespan=lifespan,
 )
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/")
 async def root():
