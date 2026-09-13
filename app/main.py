@@ -1,6 +1,6 @@
-import asyncio
 import os
 import sqlite3
+import asyncio
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -10,15 +10,19 @@ from pydantic import BaseModel
 from telegram import Bot
 
 
-APP_VERSION = os.getenv("APP_VERSION", "0.2.0")
-AUTO_BETTING = False
-
+APP_VERSION = os.getenv("APP_VERSION", "0.3.0")
 DB_FILE = "crash_history.db"
+
 MAX_HISTORY = 500
 MIN_DATA = 20
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+# Auto betting is permanently disabled.
+AUTO_BETTING = False
+
+last_alert_level = None
 
 
 class CrashResult(BaseModel):
@@ -40,7 +44,7 @@ def init_db():
     conn.close()
 
 
-def save_result(multiplier: float):
+def save_result(multiplier):
     conn = sqlite3.connect(DB_FILE)
 
     conn.execute(
@@ -62,7 +66,7 @@ def save_result(multiplier: float):
     conn.close()
 
 
-def get_history():
+def get_results():
     conn = sqlite3.connect(DB_FILE)
 
     rows = conn.execute("""
@@ -74,7 +78,7 @@ def get_history():
 
     conn.close()
 
-    return [float(row[0]) for row in rows]
+    return [float(x[0]) for x in rows]
 
 
 def history_count():
@@ -89,10 +93,87 @@ def history_count():
     return count
 
 
-async def send_telegram(message: str):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials are not configured")
-        return False
+def analyze():
+    global last_alert_level
+
+    data = get_results()
+
+    if len(data) < MIN_DATA:
+        return None
+
+    sample = data[:MIN_DATA]
+
+    average = sum(sample) / len(sample)
+
+    below_2 = sum(x < 2 for x in sample)
+    above_2 = sum(x >= 2 for x in sample)
+    above_5 = sum(x >= 5 for x in sample)
+
+    below_2_pct = below_2 / len(sample)
+    above_5_pct = above_5 / len(sample)
+
+    if below_2_pct >= 0.70:
+        level = "HIGH"
+
+        reason = (
+            "70% or more of the recent observations "
+            "were below 2x."
+        )
+
+    elif above_5_pct >= 0.20:
+        level = "WATCH"
+
+        reason = (
+            "At least 20% of the recent observations "
+            "were at or above 5x."
+        )
+
+    else:
+        level = "NORMAL"
+        reason = "No strong statistical condition detected."
+
+    # Only alert when the condition changes.
+    if level == last_alert_level:
+        return None
+
+    last_alert_level = level
+
+    if level == "NORMAL":
+        return None
+
+    return {
+        "level": level,
+        "sample": len(sample),
+        "average": average,
+        "below_2": below_2,
+        "above_2": above_2,
+        "above_5": above_5,
+        "reason": reason,
+    }
+
+
+async def send_telegram_alert(analysis):
+    if not TELEGRAM_TOKEN:
+        print("Telegram token missing")
+        return
+
+    if not TELEGRAM_CHAT_ID:
+        print("Telegram chat ID missing")
+        return
+
+    message = (
+        "📊 CrashSignalAI\n"
+        "Research Alert\n\n"
+        f"Level: {analysis['level']}\n"
+        f"Sample: {analysis['sample']}\n"
+        f"Average: {analysis['average']:.2f}x\n\n"
+        f"Below 2x: {analysis['below_2']}\n"
+        f"2x+: {analysis['above_2']}\n"
+        f"5x+: {analysis['above_5']}\n\n"
+        f"Reason:\n{analysis['reason']}\n\n"
+        "⚠️ Statistical information only.\n"
+        "Auto Betting: OFF"
+    )
 
     try:
         bot = Bot(token=TELEGRAM_TOKEN)
@@ -102,90 +183,10 @@ async def send_telegram(message: str):
             text=message
         )
 
-        print("Telegram research alert sent")
-        return True
+        print("Research alert sent to Telegram")
 
     except Exception as error:
-        print(f"Telegram send error: {error}")
-        return False
-
-
-def analyze():
-    data = get_history()
-
-    if len(data) < MIN_DATA:
-        return None
-
-    recent = data[:MIN_DATA]
-
-    below_2 = sum(x < 2 for x in recent)
-    above_2 = sum(x >= 2 for x in recent)
-    above_5 = sum(x >= 5 for x in recent)
-
-    average = sum(recent) / len(recent)
-
-    low_ratio = below_2 / len(recent)
-    high_ratio = above_5 / len(recent)
-
-    # Research-only classification.
-    # This is NOT a betting recommendation.
-    if low_ratio >= 0.70:
-        level = "HIGH"
-        reason = (
-            "Recent sample has an unusually high "
-            "share of results below 2x."
-        )
-
-    elif high_ratio >= 0.20:
-        level = "WATCH"
-        reason = (
-            "Recent sample contains an elevated "
-            "number of results at or above 5x."
-        )
-
-    else:
-        level = "NORMAL"
-        reason = (
-            "Recent sample does not show a strong "
-            "statistical condition."
-        )
-
-    return {
-        "level": level,
-        "reason": reason,
-        "average": average,
-        "below_2": below_2,
-        "above_2": above_2,
-        "above_5": above_5,
-        "sample": len(recent),
-    }
-
-
-async def process_signal():
-    analysis = analyze()
-
-    if not analysis:
-        return
-
-    # Avoid sending NORMAL messages continuously.
-    if analysis["level"] == "NORMAL":
-        return
-
-    message = (
-        "📊 CrashSignalAI — Research Alert\n\n"
-        f"Level: {analysis['level']}\n"
-        f"Sample: {analysis['sample']} results\n"
-        f"Below 2x: {analysis['below_2']}\n"
-        f"2x or higher: {analysis['above_2']}\n"
-        f"5x or higher: {analysis['above_5']}\n"
-        f"Sample average: {analysis['average']:.2f}x\n\n"
-        f"{analysis['reason']}\n\n"
-        "⚠️ Research information only.\n"
-        "No betting instruction.\n"
-        "Auto Betting: OFF"
-    )
-
-    await send_telegram(message)
+        print(f"Telegram alert error: {error}")
 
 
 async def start(update, context):
@@ -197,6 +198,20 @@ async def start(update, context):
     )
 
 
+app = FastAPI(
+    title="CrashSignalAI",
+)
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/")
 async def root():
     return {
@@ -205,6 +220,34 @@ async def root():
         "status": "ONLINE",
         "auto_betting": False,
         "history": history_count(),
+    }
+
+
+@app.get("/status")
+async def status():
+    count = history_count()
+
+    return {
+        "bot": "ONLINE",
+        "engine": (
+            "ANALYZING"
+            if count >= MIN_DATA
+            else "COLLECTING_DATA"
+        ),
+        "version": APP_VERSION,
+        "auto_betting": False,
+        "history": count,
+        "minimum_data": MIN_DATA,
+    }
+
+
+@app.get("/history")
+async def history():
+    data = get_results()
+
+    return {
+        "count": len(data),
+        "results": data,
     }
 
 
@@ -228,9 +271,11 @@ async def ingest(result: CrashResult):
         f"| History: {count}/{MAX_HISTORY}"
     )
 
-    # Start analysis once minimum data exists.
     if count >= MIN_DATA:
-        await process_signal()
+        analysis = analyze()
+
+        if analysis:
+            await send_telegram_alert(analysis)
 
     return {
         "status": "SAVED",
@@ -239,52 +284,8 @@ async def ingest(result: CrashResult):
     }
 
 
-@app.get("/history")
-async def get_history_endpoint():
-
-    data = get_history()
-
-    return {
-        "count": len(data),
-        "results": data,
-    }
-
-
-@app.get("/status")
-async def api_status():
-
-    count = history_count()
-
-    return {
-        "bot": "ONLINE",
-        "engine": (
-            "ANALYZING"
-            if count >= MIN_DATA
-            else "COLLECTING_DATA"
-        ),
-        "version": APP_VERSION,
-        "auto_betting": False,
-        "history": count,
-        "minimum_data": MIN_DATA,
-    }
-
-
-app = FastAPI(
-    title="CrashSignalAI",
-)
-
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app):
     init_db()
 
     print("CrashSignalAI database ready")
