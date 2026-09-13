@@ -1,9 +1,12 @@
+import asyncio
 import os
 
+import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+
 
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 AUTO_BETTING = os.getenv("AUTO_BETTING", "false").lower() == "true"
@@ -61,23 +64,40 @@ async def run_bot():
     if not token:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
 
-    application = Application.builder().token(token).build()
+    bot = Application.builder().token(token).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status))
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("status", status))
 
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    await bot.initialize()
+    await bot.start()
+    await bot.updater.start_polling()
 
-    return application
+    return bot
+
+
+async def run_api():
+    config = uvicorn.Config(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+        log_level="info",
+    )
+
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
+async def main():
+    bot = await run_bot()
+
+    try:
+        await run_api()
+    finally:
+        await bot.updater.stop()
+        await bot.stop()
+        await bot.shutdown()
 
 
 if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-    )
+    asyncio.run(main())
