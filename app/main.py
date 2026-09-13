@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -11,29 +12,9 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 APP_VERSION = os.getenv("APP_VERSION", "0.1.0")
 AUTO_BETTING = os.getenv("AUTO_BETTING", "false").lower() == "true"
 
-app = FastAPI(title="CrashSignalAI")
-
 
 class CrashResult(BaseModel):
     multiplier: float
-
-
-@app.get("/")
-async def root():
-    return {
-        "app": "CrashSignalAI",
-        "version": APP_VERSION,
-        "status": "ONLINE",
-        "auto_betting": AUTO_BETTING,
-    }
-
-
-@app.post("/ingest")
-async def ingest(result: CrashResult):
-    return {
-        "status": "RECEIVED",
-        "multiplier": result.multiplier,
-    }
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -58,46 +39,83 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def run_bot():
+async def telegram_bot():
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
     if not token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured")
+        print("Telegram token is not configured")
+        return
 
     bot = Application.builder().token(token).build()
 
     bot.add_handler(CommandHandler("start", start))
     bot.add_handler(CommandHandler("status", status))
 
-    await bot.initialize()
-    await bot.start()
-    await bot.updater.start_polling()
+    try:
+        await bot.initialize()
+        await bot.start()
+        await bot.updater.start_polling()
 
-    return bot
+        print("Telegram bot started")
+
+        while True:
+            await asyncio.sleep(60)
+
+    except Exception as error:
+        print(f"Telegram bot error: {error}")
+
+    finally:
+        try:
+            await bot.updater.stop()
+            await bot.stop()
+            await bot.shutdown()
+        except Exception:
+            pass
 
 
-async def run_api():
-    config = uvicorn.Config(
-        app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        log_level="info",
-    )
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    bot_task = asyncio.create_task(telegram_bot())
 
-    server = uvicorn.Server(config)
-    await server.serve()
+    yield
 
-
-async def main():
-    bot = await run_bot()
+    bot_task.cancel()
 
     try:
-        await run_api()
-    finally:
-        await bot.updater.stop()
-        await bot.stop()
-        await bot.shutdown()
+        await bot_task
+    except asyncio.CancelledError:
+        pass
+
+
+app = FastAPI(
+    title="CrashSignalAI",
+    lifespan=lifespan,
+)
+
+
+@app.get("/")
+async def root():
+    return {
+        "app": "CrashSignalAI",
+        "version": APP_VERSION,
+        "status": "ONLINE",
+        "auto_betting": AUTO_BETTING,
+    }
+
+
+@app.post("/ingest")
+async def ingest(result: CrashResult):
+    print(f"Received crash result: {result.multiplier}x")
+
+    return {
+        "status": "RECEIVED",
+        "multiplier": result.multiplier,
+    }
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000")),
+    )
