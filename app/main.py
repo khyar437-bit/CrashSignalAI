@@ -1,6 +1,7 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from fastapi.middleware.cors import CORSMiddleware
 
 import uvicorn
 from fastapi import FastAPI
@@ -94,6 +95,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
